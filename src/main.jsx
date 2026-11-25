@@ -9,9 +9,12 @@ import {
 } from 'lucide-react';
 import './style.css';
 
+const API_URL = (import.meta.env.VITE_API_URL || '').replace(/\\/$/, '');
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || undefined;
+
 const api = async (path, options = {}) => {
   const token = localStorage.getItem('principle-token');
-  const response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers } });
+  const response = await fetch(`${API_URL}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers } });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || 'Something went wrong.');
   return body;
@@ -73,7 +76,7 @@ function App() {
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [messages]);
   useEffect(() => { if (!room) return; const started = Date.now(); const interval = setInterval(() => { const sec = Math.floor((Date.now() - started) / 1000); setElapsed(`${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`); }, 1000); return () => clearInterval(interval); }, [room]);
   useEffect(() => { if (!room || !user) return; let disposed = false;
-    const socket = io('/', { auth: { token: localStorage.getItem('principle-token') }, transports: ['websocket', 'polling'] }); socketRef.current = socket;
+    const socket = io(SOCKET_URL, { auth: { token: localStorage.getItem('principle-token') }, transports: ['websocket', 'polling'] }); socketRef.current = socket;
     socket.on('connect', () => { setSocketState('connected'); socket.emit('room:join', { roomId: room }); });
     socket.on('disconnect', () => setSocketState('disconnected'));
     socket.on('connect_error', e => setMediaError(e.message || 'Could not connect to the room.'));
