@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import './style.css';
 
-const API_URL = (import.meta.env.VITE_API_URL || '').replace(/\\/$/, '');
+const API_URL = (import.meta.env.VITE_API_URL || '').replace(new RegExp('/$'), '');
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || undefined;
 
 const api = async (path, options = {}) => {
