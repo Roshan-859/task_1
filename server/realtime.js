@@ -28,7 +28,7 @@ export function attachRealtime(httpServer, { secret, clientOrigin, iceServers })
     return /^[A-Z0-9-]{4,24}$/.test(room) ? room : '';
   }
   function memberFor(socket) {
-    return { id: socket.id, userId: socket.user.id || socket.user.sub, name: socket.user.name, role: socket.user.role, audioOn: true, videoOn: true, joinedAt: Date.now() };
+    return { id: socket.id, userId: socket.user.id || socket.user.sub, name: socket.user.name, role: socket.user.role, audioOn: true, videoOn: true, audioLocked: false, videoLocked: false, joinedAt: Date.now() };
   }
   function publicMembers(entry) {
     return [...entry.members.values()].map(({ id, name, role, audioOn, videoOn }) => ({ id, name, role, audioOn, videoOn }));
@@ -78,16 +78,22 @@ export function attachRealtime(httpServer, { secret, clientOrigin, iceServers })
       const entry = rooms.get(socket.data.room);
       const member = entry?.members.get(socket.id);
       if (!member) return;
-      if (typeof audioOn === 'boolean') member.audioOn = audioOn;
-      if (typeof videoOn === 'boolean') member.videoOn = videoOn;
+      if (member.audioLocked && typeof audioOn === 'boolean') socket.emit('moderation:media', { kind: 'audio', disabled: true });
+      else if (typeof audioOn === 'boolean') member.audioOn = audioOn;
+      if (member.videoLocked && typeof videoOn === 'boolean') socket.emit('moderation:media', { kind: 'video', disabled: true });
+      else if (typeof videoOn === 'boolean') member.videoOn = videoOn;
       io.to(socket.data.room).emit('participant:media', { id: socket.id, audioOn: member.audioOn, videoOn: member.videoOn });
     });
 
     socket.on('moderation:media', ({ targetId, kind, disabled } = {}) => {
       const entry = rooms.get(socket.data.room);
-      if (!isHost(socket, entry) || !entry.members.has(targetId) || targetId === socket.id) return;
+      const member = entry?.members.get(targetId);
+      if (!isHost(socket, entry) || !member || targetId === socket.id) return;
       if (!['audio', 'video'].includes(kind) || typeof disabled !== 'boolean') return;
+      if (kind === 'audio') { member.audioLocked = disabled; member.audioOn = !disabled; }
+      if (kind === 'video') { member.videoLocked = disabled; member.videoOn = !disabled; }
       io.to(targetId).emit('moderation:media', { kind, disabled });
+      io.to(socket.data.room).emit('participant:media', { id: targetId, audioOn: member.audioOn, videoOn: member.videoOn });
     });
 
     socket.on('moderation:kick', ({ targetId } = {}) => {
