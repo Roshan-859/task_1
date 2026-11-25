@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: task-1-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CLIENT_ORIGIN
+        value: https://task-1-five-murex.vercel.app
+      - key: JWT_SECRET
+        generateValue: true
