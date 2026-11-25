@@ -33,16 +33,18 @@ app.use('/api/auth', (req, res, next) => {
   next();
 });
 
-function issueToken(user) { return jwt.sign({ sub: user.id, name: user.name, email: user.email }, secret, { expiresIn: '12h', issuer: 'principle' }); }
-function publicUser(user) { return { id: user.id, name: user.name, email: user.email }; }
+function issueToken(user) { const role = user.role || 'participant'; return jwt.sign({ sub: user.id, id: user.id, name: user.name, email: user.email, role }, secret, { expiresIn: '12h', issuer: 'principle' }); }
+function publicUser(user) { return { id: user.id || user.sub, name: user.name, email: user.email, role: user.role || 'participant' }; }
 
 app.post('/api/auth/register', async (req, res) => {
   try {
     const name = String(req.body?.name || '').trim().slice(0, 60);
     const email = String(req.body?.email || '').trim().toLowerCase();
     const password = String(req.body?.password || '');
+    const role = String(req.body?.role || 'participant');
+    if (!['host', 'participant'].includes(role)) return res.status(400).json({ error: 'Choose Host or Participant.' });
     if (name.length < 2 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 10 || password.length > 128) return res.status(400).json({ error: 'Enter a name, valid email, and password of at least 10 characters.' });
-    const user = { id: crypto.randomUUID(), name, email, passwordHash: await bcrypt.hash(password, 12), createdAt: new Date().toISOString() };
+    const user = { id: crypto.randomUUID(), name, email, role, passwordHash: await bcrypt.hash(password, 12), createdAt: new Date().toISOString() };
     if (!await createUser(user)) return res.status(409).json({ error: 'An account with that email already exists.' });
     return res.status(201).json({ token: issueToken(user), user: publicUser(user) });
   } catch (error) { console.error('Registration failed:', error.message); return res.status(500).json({ error: 'Could not create your account.' }); }
@@ -52,8 +54,9 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const email = String(req.body?.email || '').trim().toLowerCase();
     const password = String(req.body?.password || '');
+    const role = String(req.body?.role || 'participant');
     const user = await findUserByEmail(email);
-    if (!user || !await bcrypt.compare(password, user.passwordHash)) return res.status(401).json({ error: 'Email or password is incorrect.' });
+    if (!['host', 'participant'].includes(role) || !user || (user.role || 'participant') !== role || !await bcrypt.compare(password, user.passwordHash)) return res.status(401).json({ error: 'Email, password, or account type is incorrect.' });
     return res.json({ token: issueToken(user), user: publicUser(user) });
   } catch (error) { console.error('Login failed:', error.message); return res.status(500).json({ error: 'Could not sign in.' }); }
 });
