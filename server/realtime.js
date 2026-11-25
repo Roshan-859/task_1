@@ -1,5 +1,6 @@
 import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
+import crypto from 'node:crypto';
 
 const rooms = new Map();
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -17,29 +18,87 @@ export function attachRealtime(httpServer, { secret, clientOrigin, iceServers })
       const token = socket.handshake.auth?.token;
       if (!token) return next(new Error('Sign in to join a room'));
       socket.user = jwt.verify(token, secret);
+      socket.user.role ||= 'participant';
       next();
     } catch { next(new Error('Your session expired. Please sign in again.')); }
   });
 
+  function validRoomId(value) {
+    const room = String(value || '').trim().toUpperCase();
+    return /^[A-Z0-9-]{4,24}$/.test(room) ? room : '';
+  }
+  function memberFor(socket) {
+    return { id: socket.id, userId: socket.user.id || socket.user.sub, name: socket.user.name, role: socket.user.role, audioOn: true, videoOn: true, joinedAt: Date.now() };
+  }
+  function publicMembers(entry) {
+    return [...entry.members.values()].map(({ id, name, role, audioOn, videoOn }) => ({ id, name, role, audioOn, videoOn }));
+  }
+  function isHost(socket, entry) {
+    return socket.user.role === 'host' && (socket.user.id || socket.user.sub) === entry?.hostUserId;
+  }
+  function joinRoom(socket, room, entry) {
+    if (entry.members.has(socket.id)) return;
+    if (entry.members.size >= 8) return socket.emit('room:error', 'This room has reached its 8 person limit.');
+    const peers = [...entry.members.values()].map(({ id, name }) => ({ id, name }));
+    const member = memberFor(socket);
+    entry.members.set(socket.id, member);
+    socket.data.room = room;
+    socket.join(room);
+    socket.emit('room:peers', { roomId: room, selfId: socket.id, peers, participants: publicMembers(entry), hostUserId: entry.hostUserId });
+    socket.to(room).emit('peer:joined', { id: socket.id, name: member.name, role: member.role, audioOn: member.audioOn, videoOn: member.videoOn });
+  }
+
   io.on('connection', socket => {
     socket.emit('rtc-config', iceServers);
-    socket.on('room:join', ({ roomId }) => {
-      const room = String(roomId || '').trim().toUpperCase();
-      if (!/^[A-Z0-9-]{4,24}$/.test(room)) return socket.emit('room:error', 'Room code must be 4–24 letters or numbers.');
-      const members = rooms.get(room) || new Map();
-      if (members.size >= 8) return socket.emit('room:error', 'This room has reached its 8 person limit.');
-      if (members.has(socket.id)) return;
-      const peers = [...members.values()];
-      members.set(socket.id, { id: socket.id, name: socket.user.name, joinedAt: Date.now() });
-      rooms.set(room, members);
-      socket.data.room = room;
-      socket.join(room);
-      socket.emit('room:peers', { roomId: room, selfId: socket.id, peers, participants: [...members.values()] });
-      socket.to(room).emit('peer:joined', { id: socket.id, name: socket.user.name });
+
+    socket.on('room:create', ({ roomId } = {}) => {
+      const room = validRoomId(roomId);
+      if (!room) return socket.emit('room:error', 'Room code must be 4–24 letters or numbers.');
+      if (socket.user.role !== 'host') return socket.emit('room:error', 'Only Host accounts can create a room.');
+      if (rooms.has(room)) return socket.emit('room:error', 'That room code is already in use. Create another room.');
+      const entry = { hostUserId: socket.user.id || socket.user.sub, members: new Map() };
+      rooms.set(room, entry);
+      joinRoom(socket, room, entry);
     });
-    socket.on('rtc:signal', ({ to, signal }) => {
-      if (socket.data.room && typeof to === 'string') io.to(to).emit('rtc:signal', { from: socket.id, signal });
+
+    socket.on('room:join', ({ roomId } = {}) => {
+      const room = validRoomId(roomId);
+      if (!room) return socket.emit('room:error', 'Room code must be 4–24 letters or numbers.');
+      const entry = rooms.get(room);
+      if (!entry) return socket.emit('room:error', 'Room not found. Ask the host for an active invite link.');
+      joinRoom(socket, room, entry);
     });
+
+    socket.on('rtc:signal', ({ to, signal } = {}) => {
+      const entry = rooms.get(socket.data.room);
+      if (entry?.members.has(to) && typeof to === 'string') io.to(to).emit('rtc:signal', { from: socket.id, signal });
+    });
+
+    socket.on('participant:media', ({ audioOn, videoOn } = {}) => {
+      const entry = rooms.get(socket.data.room);
+      const member = entry?.members.get(socket.id);
+      if (!member) return;
+      if (typeof audioOn === 'boolean') member.audioOn = audioOn;
+      if (typeof videoOn === 'boolean') member.videoOn = videoOn;
+      io.to(socket.data.room).emit('participant:media', { id: socket.id, audioOn: member.audioOn, videoOn: member.videoOn });
+    });
+
+    socket.on('moderation:media', ({ targetId, kind, disabled } = {}) => {
+      const entry = rooms.get(socket.data.room);
+      if (!isHost(socket, entry) || !entry.members.has(targetId) || targetId === socket.id) return;
+      if (!['audio', 'video'].includes(kind) || typeof disabled !== 'boolean') return;
+      io.to(targetId).emit('moderation:media', { kind, disabled });
+    });
+
+    socket.on('moderation:kick', ({ targetId } = {}) => {
+      const entry = rooms.get(socket.data.room);
+      if (!isHost(socket, entry) || !entry.members.has(targetId) || targetId === socket.id) return;
+      const target = io.sockets.sockets.get(targetId);
+      if (!target || target.user.id === entry.hostUserId || target.user.sub === entry.hostUserId) return;
+      target.emit('moderation:kicked');
+      target.disconnect(true);
+    });
+
     socket.on('board:draw', data => {
       if (socket.data.room && validStroke(data)) socket.to(socket.data.room).emit('board:draw', data);
     });
@@ -57,10 +116,10 @@ export function attachRealtime(httpServer, { secret, clientOrigin, iceServers })
     socket.on('disconnect', () => {
       const room = socket.data.room;
       if (!room) return;
-      const members = rooms.get(room);
-      members?.delete(socket.id);
-      socket.to(room).emit('peer:left', { id: socket.id, participants: [...(members?.values() || [])] });
-      if (!members?.size) rooms.delete(room);
+      const entry = rooms.get(room);
+      entry?.members.delete(socket.id);
+      socket.to(room).emit('peer:left', { id: socket.id, participants: publicMembers(entry || { members: new Map() }) });
+      if (!entry?.members.size) rooms.delete(room);
     });
   });
   return io;
